@@ -1,0 +1,36 @@
+export function formatNumber(value: number): string {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}k`;
+  return value.toLocaleString();
+}
+
+export function formatScore(value: number): string {
+  return Math.round(value).toString();
+}
+
+/** Render an optional 0..1 ratio as "73%" or "—" if undefined. */
+export function formatRatio(value: number | undefined): string {
+  if (value === undefined || Number.isNaN(value)) return '—';
+  return `${Math.round(value * 100)}%`;
+}
+
+/** Render an optional integer field as a string or "—" if undefined. */
+export function formatOptionalInt(value: number | undefined): string {
+  if (value === undefined) return '—';
+  return Math.round(value).toString();
+}
+
+export function formatRelativeDate(iso: string): string {
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return '';
+  const now = Date.now();
+  const diffSec = Math.max(0, Math.round((now - then) / 1000));
+  if (diffSec < 60) return 'just now';
+  const diffMin = Math.round(diffSec / 60);
+  if (diffMin < 60) return `${diffMin} min ago`;
+  const diffHr = Math.round(diffMin / 60);
+  if (diffHr < 24) return diffHr === 1 ? '1 hour ago' : `${diffHr} hours ago`;
+  const diffDay = Math.round(diffHr / 24);
+  if (diffDay < 30) return diffDay === 1 ? '1 day ago' : `${diffDay} days ago`;
+  return new Date(iso).toLocaleDateString();
+}

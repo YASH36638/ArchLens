@@ -1,0 +1,194 @@
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["driverAdapters"]
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_DATABASE_URL")
+}
+
+model User {
+  id             String   @id @default(uuid()) @db.Uuid
+  email          String?  @unique
+  name           String?
+  avatarUrl      String?
+  githubUsername String?  @unique
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  accounts     Account[]
+  repositories Repository[]
+
+  @@map("users")
+}
+
+model Account {
+  id                String   @id @default(uuid()) @db.Uuid
+  userId            String   @db.Uuid
+  provider          String
+  providerAccountId String
+  accessToken       String?
+  refreshToken      String?
+  scope             String?
+  tokenType         String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+  @@map("accounts")
+}
+
+model Repository {
+  id            String   @id @default(uuid()) @db.Uuid
+  userId        String   @db.Uuid
+  provider      String   @default("github")
+  owner         String
+  name          String
+  fullName      String
+  defaultBranch String   @default("main")
+  private       Boolean  @default(false)
+  htmlUrl       String?
+  connectedAt   DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  user  User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  scans Scan[]
+
+  @@unique([userId, provider, fullName])
+  @@index([userId])
+  @@map("repositories")
+}
+
+model Scan {
+  id           String    @id @default(uuid()) @db.Uuid
+  repoId       String    @db.Uuid
+  status       String    @default("queued")
+  progressPct  Int       @default(0)
+  progressStep String?
+  error        String?
+  cloneUrl     String
+  ref          String?
+  createdAt    DateTime  @default(now())
+  startedAt    DateTime?
+  finishedAt   DateTime?
+
+  repository Repository @relation(fields: [repoId], references: [id], onDelete: Cascade)
+  report     Report?
+
+  @@index([repoId, createdAt])
+  @@index([status])
+  @@map("scans")
+}
+
+model Report {
+  id               String   @id @default(uuid()) @db.Uuid
+  scanId           String   @unique @db.Uuid
+  repoId           String   @db.Uuid
+  irVersion        String
+  grade            String
+  overallScore     Float
+  complexityScore  Float
+  duplicationScore Float
+  couplingScore    Float
+  cohesionScore    Float
+  smellsScore      Float
+  modulesCount     Int      @default(0)
+  filesCount       Int      @default(0)
+  classesCount     Int      @default(0)
+  functionsCount   Int      @default(0)
+  smellsCount      Int      @default(0)
+  irBlobPath       String
+  sourceDirPath    String?
+  generatedAt      DateTime @default(now())
+
+  scan        Scan            @relation(fields: [scanId], references: [id], onDelete: Cascade)
+  modules     Module[]
+  files       File[]
+  smells      Smell[]
+  suggestions FixSuggestion[]
+
+  @@index([repoId, generatedAt])
+  @@map("reports")
+}
+
+model Module {
+  id         String  @id @default(uuid()) @db.Uuid
+  reportId   String  @db.Uuid
+  irModuleId String
+  name       String
+  virtual    Boolean @default(false)
+  filesCount Int     @default(0)
+
+  report Report @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  files  File[]
+
+  @@index([reportId])
+  @@map("modules")
+}
+
+model File {
+  id        String  @id @default(uuid()) @db.Uuid
+  reportId  String  @db.Uuid
+  moduleId  String  @db.Uuid
+  irFileId  String
+  path      String
+  language  String
+  loc       Int     @default(0)
+  sha256    String?
+  byteSize  Int?
+  truncated Boolean @default(false)
+
+  report Report  @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  module Module  @relation(fields: [moduleId], references: [id], onDelete: Cascade)
+  smells Smell[]
+
+  @@index([reportId])
+  @@index([moduleId])
+  @@map("files")
+}
+
+model Smell {
+  id        String  @id @default(uuid()) @db.Uuid
+  reportId  String  @db.Uuid
+  fileId    String? @db.Uuid
+  irSmellId String
+  kind      String
+  ruleId    String
+  severity  String
+  message   String
+  filePath  String
+  startLine Int?
+  endLine   Int?
+
+  report      Report          @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  file        File?           @relation(fields: [fileId], references: [id], onDelete: SetNull)
+  suggestions FixSuggestion[]
+
+  @@index([reportId])
+  @@index([reportId, severity])
+  @@map("smells")
+}
+
+model FixSuggestion {
+  id               String   @id @default(uuid()) @db.Uuid
+  smellId          String   @db.Uuid
+  reportId         String   @db.Uuid
+  model            String
+  promptHash       String
+  contentMarkdown  String
+  promptTokens     Int?
+  completionTokens Int?
+  createdAt        DateTime @default(now())
+
+  smell  Smell  @relation(fields: [smellId], references: [id], onDelete: Cascade)
+  report Report @relation(fields: [reportId], references: [id], onDelete: Cascade)
+
+  @@unique([smellId, model, promptHash])
+  @@index([reportId])
+  @@map("fix_suggestions")
+}

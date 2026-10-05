@@ -1,0 +1,101 @@
+{
+  "generatedAt": "2026-05-13T18:21:22.393Z",
+  "repos": {
+    "internshipPortal": {
+      "languages": ["javascript"],
+      "grade": "C",
+      "scoreBreakdown": {
+        "complexity": 51.31,
+        "duplication": 100,
+        "coupling": 81.15,
+        "cohesion": 100,
+        "smells": 69.34,
+        "overall": 76.98,
+        "derivation": {
+          "complexity": "100 − hot-spot density × 2 = 51 (12 hot-spot functions over 3,327 LOC)",
+          "duplication": "100 − duplicate-lines ratio × 100 = 100 (0.0% of lines duplicated)",
+          "coupling": "100 − avg-fanOut penalty − hub penalty − dual-hub penalty − cycle penalty = 81 (13 modules, avg fanOut 1.4, max 3, 1 cycle)",
+          "cohesion": "LOC-weighted average of per-module cohesion ratios × 100 = 100 (2,985 LOC across modules with signal)",
+          "smells": "100 − Σ severity-weighted rate per KLOC = 69 (0 critical, 15 major, 8 minor, 0 info across 3,327 LOC)"
+        }
+      },
+      "moduleCount": 13,
+      "edgeCount": 18,
+      "totalLoc": 3327,
+      "totalFunctions": 53,
+      "totalClasses": 2,
+      "smellsBySeverity": {
+        "critical": 0,
+        "major": 15,
+        "minor": 8,
+        "info": 0
+      },
+      "elapsedSeconds": 0.6
+    },
+    "stockTrading": {
+      "languages": ["java"],
+      "grade": "B",
+      "scoreBreakdown": {
+        "complexity": 100,
+        "duplication": 100,
+        "coupling": 70.17,
+        "cohesion": 100,
+        "smells": 77.66,
+        "overall": 85.97,
+        "measurementNotes": {
+          "cohesion": "limited signal — no module-internal imports detected"
+        },
+        "derivation": {
+          "complexity": "100 − hot-spot density × 2 = 100 (0 hot-spot functions over 1,410 LOC)",
+          "duplication": "100 − duplicate-lines ratio × 100 = 100 (0.0% of lines duplicated)",
+          "coupling": "100 − avg-fanOut penalty − hub penalty − dual-hub penalty − cycle penalty = 70 (15 modules, avg fanOut 1.5, max 10, 0 cycles)",
+          "cohesion": "no module with internal/external edge signal — defaulted to 100",
+          "smells": "100 − Σ severity-weighted rate per KLOC = 78 (0 critical, 4 major, 5 minor, 0 info across 1,410 LOC)"
+        }
+      },
+      "moduleCount": 15,
+      "edgeCount": 23,
+      "totalLoc": 1410,
+      "totalFunctions": 70,
+      "totalClasses": 31,
+      "smellsBySeverity": {
+        "critical": 0,
+        "major": 4,
+        "minor": 5,
+        "info": 0
+      },
+      "elapsedSeconds": 0.7
+    },
+    "stockBot": {
+      "languages": ["python"],
+      "grade": "D",
+      "scoreBreakdown": {
+        "complexity": 60.48,
+        "duplication": 100,
+        "coupling": 52.43,
+        "cohesion": 73.13,
+        "smells": 44.22,
+        "overall": 63.04,
+        "derivation": {
+          "complexity": "100 − hot-spot density × 2 = 60 (44 hot-spot functions over 13,968 LOC)",
+          "duplication": "100 − duplicate-lines ratio × 100 = 100 (0.0% of lines duplicated)",
+          "coupling": "100 − avg-fanOut penalty − hub penalty − dual-hub penalty − cycle penalty = 52 (14 modules, avg fanOut 1.9, max 8, 1 cycle)",
+          "cohesion": "LOC-weighted average of per-module cohesion ratios × 100 = 73 (13,771 LOC across modules with signal)",
+          "smells": "100 − Σ severity-weighted rate per KLOC = 44 (3 critical, 65 major, 190 minor, 97 info across 13,968 LOC)"
+        }
+      },
+      "moduleCount": 14,
+      "edgeCount": 26,
+      "totalLoc": 13968,
+      "totalFunctions": 493,
+      "totalClasses": 9,
+      "smellsBySeverity": {
+        "critical": 3,
+        "major": 65,
+        "minor": 190,
+        "info": 97
+      },
+      "elapsedSeconds": 0.3
+    }
+  }
+}

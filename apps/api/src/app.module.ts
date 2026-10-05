@@ -1,0 +1,60 @@
+import { Module } from '@nestjs/common';
+import { ConfigModule } from '@nestjs/config';
+import { APP_FILTER, APP_GUARD, APP_INTERCEPTOR, APP_PIPE } from '@nestjs/core';
+
+import configuration from './config/configuration';
+import { validateEnv } from './config/validation.schema';
+
+import { HttpExceptionFilter } from './common/filters/http-exception.filter';
+import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
+import { ZodValidationPipe } from './common/pipes/zod-validation.pipe';
+import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
+
+import { PrismaModule } from './database/prisma.module';
+import { QueueModule } from './queue/queue.module';
+import { AuthModule } from './modules/auth/auth.module';
+import { UsersModule } from './modules/users/users.module';
+import { RepositoriesModule } from './modules/repositories/repositories.module';
+import { ScansModule } from './modules/scans/scans.module';
+import { ReportsModule } from './modules/reports/reports.module';
+import { FixSuggestionsModule } from './modules/fix-suggestions/fix-suggestions.module';
+import { ArchitectureModule } from './modules/architecture/architecture.module';
+import { HotspotsModule } from './modules/hotspots/hotspots.module';
+import { SmellsModule } from './modules/smells/smells.module';
+import { MetricsModule } from './modules/metrics/metrics.module';
+import { HealthModule } from './modules/health/health.module';
+import { DashboardModule } from './modules/dashboard/dashboard.module';
+
+@Module({
+  imports: [
+    ConfigModule.forRoot({
+      isGlobal: true,
+      cache: true,
+      // Prefer apps/api/.env over inherited shell PORT (e.g. Cursor injecting 8000).
+      envFilePath: ['.env'],
+      load: [configuration],
+      validate: validateEnv,
+    }),
+    PrismaModule,
+    QueueModule,
+    AuthModule,
+    UsersModule,
+    RepositoriesModule,
+    ScansModule,
+    ReportsModule,
+    FixSuggestionsModule,
+    ArchitectureModule,
+    HotspotsModule,
+    SmellsModule,
+    MetricsModule,
+    HealthModule,
+    DashboardModule,
+  ],
+  providers: [
+    { provide: APP_FILTER, useClass: HttpExceptionFilter },
+    { provide: APP_INTERCEPTOR, useClass: LoggingInterceptor },
+    { provide: APP_PIPE, useClass: ZodValidationPipe },
+    { provide: APP_GUARD, useClass: JwtAuthGuard },
+  ],
+})
+export class AppModule {}

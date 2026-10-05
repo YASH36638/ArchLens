@@ -1,0 +1,398 @@
+import path from 'node:path';
+import type {
+  ClassIR,
+  Edge,
+  FileIR,
+  FunctionIR,
+  Language,
+  Method,
+  Module,
+  Repo,
+  Smell,
+} from '../../ir/types.js';
+import { IR_VERSION } from '../../ir/types.js';
+import { detectDeepNesting } from '../../metrics/smells/deep-nesting.js';
+import { detectGodClass } from '../../metrics/smells/god-class.js';
+import { detectLongMethod } from '../../metrics/smells/long-method.js';
+import {
+  computeCoupling,
+  enrichModuleAbstractness,
+  enrichModuleCoupling,
+  type ModuleTypeCounts,
+} from '../../metrics/coupling.js';
+import { computeScores } from '../../scoring/engine.js';
+import { stampModuleScores } from '../../scoring/module-scores.js';
+import { mergeThresholds, mergeWeights } from '../../scoring/weights.default.js';
+import { scoreToGrade } from '../../scoring/grading.js';
+import { buildModuleGraph } from '../../graph/graph-builder.js';
+import { detectCycles } from '../../graph/cycle-detector.js';
+import type { Adapter, AnalyzerConfig } from '../adapter.interface.js';
+import {
+  runJavaParserRunner,
+  type JavaParserOutput,
+  type ParsedClass,
+  type ParsedFile,
+  type ParsedMethod,
+  type JavaParserRunnerOptions,
+} from './runners/javaparser.runner.js';
+import {
+  classifySpringClass,
+  moduleTagsFromSpringClasses,
+  type SpringClassInfo,
+} from './spring/layer-detector.js';
+import { buildBeanGraph, classKey, fqn, type BeanGraph } from './spring/bean-graph.js';
+import { applySpringRules } from './spring/spring-rules.js';
+
+// Reserved as an extension point: callers can augment via declaration
+// merging without touching JavaParserRunnerOptions itself.
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type
+export interface JavaAdapterOptions extends JavaParserRunnerOptions {}
+
+export class JavaAdapter implements Adapter {
+  readonly language: Language = 'java';
+  readonly capabilities = {
+    complexity: true,
+    // Java's import-only cohesion underreports: same-package refs need no
+    // `import`, so module-internal edges are systemically missed. Flagged
+    // as not-meaningful until type-reference analysis lands.
+    cohesion: false,
+    coupling: true,
+    smells: true,
+    abstractness: true,
+  } as const;
+
+  constructor(private readonly options: JavaAdapterOptions = {}) {}
+
+  async analyze(repoPath: string, config: AnalyzerConfig): Promise<Repo> {
+    const absRepo = path.resolve(repoPath);
+    const thresholds = mergeThresholds(config.thresholds);
+    const weights = mergeWeights(config.weights);
+
+    const runner = await runJavaParserRunner(absRepo, this.options);
+    return transformRunnerOutput(runner, absRepo, config, thresholds, weights);
+  }
+}
+
+interface ThresholdsResolved {
+  longMethodLoc: number;
+  longMethodComplexity: number;
+  godClassMethods: number;
+  godClassLoc: number;
+  deepNestingDepth: number;
+}
+
+interface WeightsResolved {
+  complexity: number;
+  duplication: number;
+  coupling: number;
+  cohesion: number;
+  smells: number;
+}
+
+function transformRunnerOutput(
+  runner: JavaParserOutput,
+  absRepo: string,
+  config: AnalyzerConfig,
+  thresholds: ThresholdsResolved,
+  weights: WeightsResolved
+): Repo {
+  const modulesByName = new Map<string, Module>();
+  const moduleSpringInfo = new Map<string, SpringClassInfo[]>();
+  const allSmells: Smell[] = [];
+  const fileEdges: Edge[] = [];
+  const moduleSizes = new Map<string, { loc: number; fileCount: number }>();
+  const moduleTypeCounts = new Map<string, ModuleTypeCounts>();
+  let totalLoc = 0;
+  let totalFunctions = 0;
+  let totalClasses = 0;
+  let totalComplexity = 0;
+  let hotSpotCount = 0;
+  let hotSpotExcess = 0;
+
+  // Pre-classify every class so the bean graph and the IR pass agree on
+  // which classes count as beans.
+  const classInfo = new Map<string, SpringClassInfo>();
+  for (const file of runner.files) {
+    for (const cls of file.classes) {
+      classInfo.set(classKey(file, cls), classifySpringClass(cls));
+    }
+  }
+
+  const beanGraph = buildBeanGraph(runner.files, classInfo);
+  const springRules = applySpringRules(beanGraph);
+  const springSmellsByBean = new Map<string, Smell[]>();
+  for (const s of springRules.smells) {
+    const list = springSmellsByBean.get(s.beanId) ?? [];
+    list.push(s);
+    springSmellsByBean.set(s.beanId, list);
+    allSmells.push(s);
+  }
+
+  for (const file of runner.files) {
+    const moduleName = moduleNameForPackage(file.packageName, file.relPath);
+    const moduleId = `mod_${sanitize(moduleName)}`;
+
+    const existingSize = moduleSizes.get(moduleId) ?? { loc: 0, fileCount: 0 };
+    moduleSizes.set(moduleId, {
+      loc: existingSize.loc + file.loc,
+      fileCount: existingSize.fileCount + 1,
+    });
+    const tc = moduleTypeCounts.get(moduleId) ?? { total: 0, abstract: 0 };
+    for (const cls of file.classes) {
+      tc.total += 1;
+      // Interfaces and annotations are abstract by definition; classes only
+      // when the `abstract` modifier is set. Enums are concrete.
+      if (cls.kind === 'interface' || cls.kind === 'annotation' || cls.isAbstract) {
+        tc.abstract += 1;
+      }
+    }
+    moduleTypeCounts.set(moduleId, tc);
+
+    const fileIR: FileIR = {
+      id: `file_${slugifyPath(file.relPath)}`,
+      path: file.relPath,
+      language: 'java',
+      loc: file.loc,
+      classes: [],
+      functions: [],
+      smells: [],
+    };
+    totalLoc += file.loc;
+
+    for (const cls of file.classes) {
+      totalClasses += 1;
+      const methodIRs: Method[] = [];
+      const classSmells: Smell[] = [];
+      const info = classInfo.get(classKey(file, cls)) ?? { layer: null, tags: [] };
+
+      for (const m of [...cls.constructors, ...cls.methods]) {
+        const methodSmells: Smell[] = [];
+        totalFunctions += 1;
+        totalComplexity += m.cyclomatic;
+        if (m.cyclomatic > thresholds.longMethodComplexity) {
+          hotSpotCount += 1;
+          hotSpotExcess += m.cyclomatic - thresholds.longMethodComplexity;
+        }
+
+        const longSmell = detectLongMethod(
+          {
+            filePath: file.relPath,
+            className: cls.name,
+            name: m.name,
+            startLine: m.startLine,
+            endLine: m.endLine,
+            loc: m.loc,
+            complexity: m.cyclomatic,
+          },
+          { loc: thresholds.longMethodLoc, complexity: thresholds.longMethodComplexity }
+        );
+        if (longSmell) methodSmells.push(longSmell);
+
+        const deepSmell = detectDeepNesting(
+          {
+            filePath: file.relPath,
+            className: cls.name,
+            name: m.name,
+            startLine: m.startLine,
+            endLine: m.endLine,
+            maxNestingDepth: m.maxNestingDepth,
+          },
+          { depth: thresholds.deepNestingDepth }
+        );
+        if (deepSmell) methodSmells.push(deepSmell);
+
+        methodIRs.push({
+          id: `${fileIR.id}__cls_${sanitize(cls.name)}__m_${sanitize(m.name)}_${m.startLine}`,
+          name: m.name,
+          signature: m.signature,
+          complexity: m.cyclomatic,
+          cognitive: m.cognitive,
+          loc: m.loc,
+          smells: methodSmells,
+        });
+        classSmells.push(...methodSmells);
+      }
+
+      const godSmell = detectGodClass(
+        {
+          filePath: file.relPath,
+          name: cls.name,
+          startLine: cls.startLine,
+          endLine: cls.endLine,
+          loc: cls.loc,
+          methodCount: cls.methods.length + cls.constructors.length,
+          attributeCount: cls.fields.length,
+        },
+        { methods: thresholds.godClassMethods, loc: thresholds.godClassLoc }
+      );
+      if (godSmell) classSmells.push(godSmell);
+
+      const beanId = fqn(file.packageName, cls.name);
+      const ownSpringSmells = springSmellsByBean.get(beanId) ?? [];
+      classSmells.push(...ownSpringSmells);
+
+      const classIR: ClassIR = {
+        id: `${fileIR.id}__cls_${sanitize(cls.name)}_${cls.startLine}`,
+        name: cls.name,
+        fanIn: 0,
+        fanOut: 0,
+        methods: methodIRs,
+        smells: classSmells,
+        tags: info.tags,
+      };
+      fileIR.classes.push(classIR);
+      allSmells.push(...classSmells.filter((s) => !ownSpringSmells.includes(s as never)));
+
+      const collected = moduleSpringInfo.get(moduleId) ?? [];
+      collected.push(info);
+      moduleSpringInfo.set(moduleId, collected);
+    }
+
+    // No top-level functions in Java — everything lives in classes.
+    fileIR.functions = [] as FunctionIR[];
+
+    const existing = modulesByName.get(moduleId);
+    if (existing) existing.files.push(fileIR);
+    else
+      modulesByName.set(moduleId, {
+        id: moduleId,
+        name: moduleName,
+        virtual: false,
+        files: [fileIR],
+        tags: [],
+      });
+
+    // Module-level edges for coupling. (Cohesion is unmeasured for Java —
+    // see the capability flag on JavaAdapter and the comment below.)
+    for (const imp of file.imports) {
+      const targetPackage = packageOfImport(imp.name);
+      if (!targetPackage) continue;
+      if (targetPackage.startsWith('java.') || targetPackage.startsWith('javax.')) continue;
+      if (targetPackage.startsWith('org.springframework')) continue;
+      const targetModuleName = moduleNameForPackage(targetPackage, '');
+      const targetModuleId = `mod_${sanitize(targetModuleName)}`;
+      if (targetModuleId === moduleId) continue;
+      fileEdges.push({ from: moduleId, to: targetModuleId, kind: 'import', weight: 1 });
+    }
+  }
+
+  // Stamp module tags from the spring layers inside.
+  for (const [moduleId, infos] of moduleSpringInfo.entries()) {
+    const mod = modulesByName.get(moduleId);
+    if (mod) mod.tags = moduleTagsFromSpringClasses(infos);
+  }
+
+  // Filter edges to only target modules we actually know about — otherwise
+  // imports of third-party packages would create dangling target nodes.
+  const knownModuleIds = new Set(Array.from(modulesByName.keys()));
+  const usableEdges = fileEdges.filter((e) => knownModuleIds.has(e.to));
+
+  const modules = Array.from(modulesByName.values()).sort((a, b) => a.id.localeCompare(b.id));
+  const aggregatedEdges = aggregateEdges(usableEdges);
+  const moduleIds = modules.map((m) => m.id);
+  const graph = buildModuleGraph(moduleIds, aggregatedEdges);
+  const cycles = detectCycles(graph);
+  const coupling = computeCoupling(aggregatedEdges);
+  const fanOutValues = Array.from(coupling.fanOut.values());
+  const fanOutTotal = fanOutValues.reduce((a, b) => a + b, 0);
+  const couplingSummary = enrichModuleCoupling(modules, coupling);
+  enrichModuleAbstractness(modules, moduleTypeCounts);
+  const martinPainSum = modules.reduce(
+    (sum, mod) =>
+      sum + (mod.martinDistance !== undefined ? Math.max(0, mod.martinDistance - 0.5) : 0),
+    0
+  );
+
+  // Cohesion is NOT measured for Java — see capability flag on JavaAdapter.
+  // Same-package references in Java need no `import` statement, so the
+  // import-based edge graph systemically misses internal edges and produces
+  // a 0% reading on any package whose classes only talk to siblings (the
+  // common Spring-service shape). Stamping that value would punish well-
+  // organised codebases for the adapter's limitation. cohesionRatio is left
+  // undefined on every module, and cohesionWeighted/moduleLocSum are not
+  // passed to computeScores — the scoring engine then attaches its
+  // "limited signal" note and excludes cohesion from the weighted overall.
+
+  stampModuleScores(modules, allSmells, cycles, thresholds.longMethodComplexity);
+
+  const scores = computeScores(
+    {
+      totalLoc,
+      totalFunctions,
+      totalClasses,
+      totalComplexity,
+      cycleCount: cycles.length,
+      moduleCount: modules.length,
+      fanOutTotal,
+      fanOutMax: couplingSummary.fanOutMax,
+      dualHubMax: couplingSummary.dualHubMax,
+      hotSpotCount,
+      hotSpotExcess,
+      // cohesionWeighted / moduleLocSum intentionally omitted — see the
+      // "Cohesion is NOT measured for Java" comment above.
+      martinPainSum,
+      smells: allSmells,
+    },
+    weights
+  );
+
+  const repo: Repo = {
+    ir_version: IR_VERSION,
+    id: config.repoId ?? `repo_${path.basename(absRepo)}`,
+    name: config.repoName ?? path.basename(absRepo),
+    scannedAt: new Date().toISOString(),
+    languages: ['java'],
+    modules,
+    edges: aggregatedEdges,
+    cycles: cycles.length > 0 ? cycles : undefined,
+    scoreBreakdown: scores,
+    grade: scoreToGrade(scores.overall),
+  };
+  return repo;
+}
+
+/**
+ * Group files into modules using the package's last segment — the feature
+ * name in the canonical Spring layout `<group>.<artifact>.<feature>`. The
+ * app's root class (`com.example.petclinic.PetclinicApplication`) lands in
+ * the artifact's module (`petclinic`); feature subpackages get their own.
+ * Files outside any package land in a `_root` module.
+ */
+export function moduleNameForPackage(packageName: string, _relPath: string): string {
+  if (!packageName) return '_root';
+  const parts = packageName.split('.').filter((p) => p.length > 0);
+  if (parts.length === 0) return '_root';
+  return parts[parts.length - 1]!;
+}
+
+function packageOfImport(importName: string): string | null {
+  // import com.foo.bar.Baz   -> package "com.foo.bar"
+  // import com.foo.bar.*     -> package "com.foo.bar"
+  const lastDot = importName.lastIndexOf('.');
+  if (lastDot < 0) return null;
+  return importName.slice(0, lastDot);
+}
+
+function aggregateEdges(edges: Edge[]): Edge[] {
+  const map = new Map<string, Edge>();
+  for (const edge of edges) {
+    const key = `${edge.from}->${edge.to}::${edge.kind}`;
+    const existing = map.get(key);
+    if (existing) existing.weight += edge.weight;
+    else map.set(key, { ...edge });
+  }
+  return Array.from(map.values());
+}
+
+function slugifyPath(relPath: string): string {
+  return relPath.replace(/[^a-zA-Z0-9]/g, '_');
+}
+
+function sanitize(name: string): string {
+  return name.replace(/[^a-zA-Z0-9_]/g, '_');
+}
+
+// Re-exports for tests/integration code that wants to call the bean graph
+// against custom inputs.
+export { buildBeanGraph, applySpringRules };
+export type { BeanGraph, ParsedClass, ParsedFile, ParsedMethod };
